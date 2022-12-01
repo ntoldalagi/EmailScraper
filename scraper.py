@@ -5,6 +5,7 @@ import json
 import re
 import time
 import os
+import shutil
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -12,6 +13,8 @@ from googleapiclient.discovery import build
 import logging
 import requests
 from bs4 import BeautifulSoup
+
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'] #,'https://www.googleapis.com/auth/gmail.modify']
 
 # email reader generator
 class EmailRetriever(object):
@@ -24,20 +27,20 @@ class EmailRetriever(object):
 
         if not os.path.exists(self.unlabeled_path):
             os.makedirs(self.unlabeled_path)
+
+        if not os.path.exists('./unlabeled/read'):
+            os.makedirs('./unlabeled/read')
+
+        if not os.path.exists('./unlabeled/unread'):
+            os.makedirs('./unlabeled/unread')
         
         if os.path.exists(self.cfg_path):
             with open(self.cfg_path, 'rb') as f:
-                self.seen_ids = pickle.load(f)
+                self.seen_unread_ids, self.seen_read_ids, self.first_id = pickle.load(f)
         else:
-            self.seen_ids = set()
-
-        if os.path.exists('./unlabeled/manifest.cfg'):
-            with open('./unlabeled/manifest.cfg', 'r') as f:
-                for line in f:
-                    self.last_written_id = int(line)
-                    break
-        else:
-            self.last_written_id = 0
+            self.seen_unread_ids = set()
+            self.seen_read_ids = set()
+            self.first_id = '184cad4ce2f961a7'
 
         if os.path.exists('token.json'):
             self.creds = Credentials.from_authorized_user_file('token.json', SCOPES)
@@ -55,8 +58,8 @@ class EmailRetriever(object):
         self.messages = None
         self.next_msg = 0
 
-        self.max_msgs = 4 # for now for safety
-
+        self.max_msgs = 1 # per retrieval cycle
+    
     def __iter__(self):
         return self
 
@@ -65,78 +68,169 @@ class EmailRetriever(object):
 
     def cleanup(self):
         with open(self.cfg_path, 'wb') as f: # dump the dictionary
-            pickle.dump(self.seen_ids, f)
-        with open('./unlabeled/manifest.cfg', 'w') as f:
-            f.write('{}'.format(self.last_written_id))
+            pickle.dump((self.seen_unread_ids, self.seen_read_ids, self.first_id), f)
 
     def next(self):
+        def hr_to_label(hr):
+            hr = int(hr)
+
+            if 6 <= hr and hr < 11: # morning
+                return 'morn'
+            elif 11 <= hr and hr < 16: # midday 
+                return 'noon'
+            elif 16 <= hr and hr < 21: # evening
+                return 'even'
+            elif 21 <= hr or hr < 2: # night time
+                return 'night'
+            else # late night
+                return 'late'
+
         if (self.count >= self.max_msgs):
             print('reached max messages')
             self.cleanup()
             raise StopIteration()
 
-        if self.messages is None or self.next_msg == len(self.messages): # go get more
-            self.next_msg = 0
-            try:
-                self.service = build('gmail', 'v1', credentials=self.creds) #, q='is:unread'
-                results = self.service.users().messages().list(userId='me', labelIds=['INBOX']).execute()
-                self.messages = results.get('messages', [])
-                print('got messages')
-                if not self.messages:
-                    print('No new messages')
-                    self.cleanup()
-                    raise StopIteration() 
-            except Exception as error:
-                print(f'An eror occurred: {error}')
-        message = self.messages[self.next_msg]
-        self.next_msg += 1
-        new_id = message['id']
-        print(message)
-
-        if new_id in self.seen_ids:
-            print('encountered old message')
+        keep_going = True
+        while (keep_going):
+            if self.messages is None or self.next_msg == len(self.messages): # go get more
+                self.next_msg = 0
+                try:
+                    self.service = build('gmail', 'v1', credentials=self.creds) #, q='is:unread'
+                    results = self.service.users().messages().list(userId='me', labelIds=['INBOX']).execute()
+                    self.messages = results.get('messages', [])
+                    print('got messages')
+                    if not self.messages:
+                        print('No new messages')
+                        self.cleanup()
+                        raise StopIteration() 
+                except Exception as error:
+                    print(f'An eror occurred: {error}')
+            message = self.messages[self.next_msg]
             self.next_msg += 1
-            return self.next()
+            new_id = message['id']
+
+            # TODO: add timesstamps
+            if new_id == self.first_id:
+                raise StopIteration()
+            elif new_id in self.seen_unread_ids:
+                print('got seen unread')
+                msg = self.service.users().messages().get(userId='me', id=message['id']).execute()
+                read = 'UNREAD' not in msg['labelIds']
+                
+                if read:
+                    self.seen_unread_ids.remove(new_id)
+                    self.seen_read_ids.add(new_id)
+                    hr = time.strftime('%H') # get current hr
+                    label = hr_to_label(hr)
+                    # move dumped file
+                    shutil.move('./unlabeled/unread/unlabeled_{}.txt'.format(new_id), './unlabeled/read/unlabeled_{}.txt'.format(new_id))
+
+                    # add label by prepending a line
+                    with open('./unlabeled/read/unlabeled_{}.txt'.format(new_id), 'r') as f:
+                        old_snippet = f.read()
+                    with open('./unlabeled/read/unlabeled_{}.txt'.format(new_id), 'w') as f:
+                        f.write('{}\n'.format(label) + old_snippet) 
+
+                    print('moving file')
+
+                keep_going = True
+            elif new_id in self.seen_read_ids: # done all we can with this one
+                print('got seen read')
+                keep_going = True
+            else:
+                print('got fresh')
+                keep_going = False
+
+            print(message)
+
+        #if new_id in self.seen_ids:
+        #    print('encountered old message')
+        #    self.next_msg += 1
+        #    return self.next()
+        print('fell through')
+
+        if self.first_id is None:
+            self.first_id = new_id
         
-        self.count += 1
         msg = self.service.users().messages().get(userId='me', id=message['id']).execute()
 
         read = 'UNREAD' not in msg['labelIds']
         read_token = 'r' if read else 'u'
 
-        email_data = msg['payload']['headers']
-        for values in email_data:
-            name = values['name']
-            if name == 'From':
-                from_name = values['value']
-                
-                if 'parts' in msg['payload']:
-                    d = msg['payload']['parts']
-                elif 'body' in msg['payload']:
-                    d = msg['payload']['body']                
+        email_data = msg['snippet'] # we use just the snippet as enough information 
 
-                for part in d:
-                    try:
-                        data = part['body']["data"]
-                        byte_code = base64.urlsafe_b64decode(data)
+        if read:
+            self.seen_read_ids.add(new_id)
+        else:
+            self.seen_unread_ids.add(new_id)
 
-                        text = byte_code.decode('utf-8')
-                        self.seen_ids.add(new_id)
-                        self.last_written_id += 1
-                        if '<!' in text[:5]: # suspected HTML lets clean this up
-                            bs = BeautifulSoup(text, 'html.parser')
-                            text = str(bs.get_text())
-                        else:
-                            text = str(text)
-                        print(text[:100])
-                        with open('./unlabeled/{}_unlabeled_{}.txt'.format(read_token, self.last_written_id), 'w') as f:
-                            print('writing')
-                            f.write(text)
-                        return text 
-                    except BaseException as error:
-                        pass
+        self.count += 1
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'] #,'https://www.googleapis.com/auth/gmail.modify']
+        print('snippet: ', email_data)
+
+        hr = time.strftime('%H')
+        label = hr_to_label(hr)
+        if (read):
+            with open('./unlabeled/read/unlabeled_{}.txt'.format(new_id), 'w') as f:
+                f.write('{}\n'.format(label) + email_data)
+                return email_data
+        else:
+            with open('./unlabeled/unread/unlabeled_{}.txt'.format(new_id), 'w') as f:
+                f.write(email_data)
+                return email_data
+        #for values in email_data:
+        #    name = values['name']
+        #    if name == 'From':
+        #        from_name = values['value']
+        #        
+        #        if 'parts' in msg['payload']:
+        #            print('type 1')
+        #            d = msg['payload']['parts']
+        #        elif 'body' in msg['payload']:
+        #            print('type 2')
+        #            d = msg['payload']['body']                
+        #        #print(d)
+        #        for part in d:
+        #            #print('here')
+        #            #print(part)
+        #            try:
+        #                data = part['body']["data"]
+
+        #                print('data: ', data)
+        #                return ''
+        #                byte_code = base64.urlsafe_b64decode(data)
+
+        #                text = byte_code.decode('utf-8')
+
+        #                if (read):
+        #                    self.seen_read_ids(new_id)
+        #                else:
+        #                    self.seen_unread_ids(new_id)
+
+        #                self.count += 1 # a new understandable message
+        #                self.last_written_id += 1
+        #                if '<!' in text[:5]: # suspected HTML lets clean this up
+        #                    print('html')
+        #                    bs = BeautifulSoup(text, 'html.parser')
+        #                    text = str(bs.get_text())
+        #                else:
+        #                    text = str(text)
+
+        #                if (read):
+        #                    with open('./unlabeled/read/unlabeled_{}.txt'.format(self.last_written_id), 'w') as f:
+        #                        print('writing')
+        #                        f.write(text)
+        #                    return text 
+        #                else:
+        #                    with open('./unlabeled/unread/unlabeled_{}.txt'.format(self.last_written_ids), 'w') as f:
+        #                        f.write(text)
+        #                        print('writing unread')
+        #                    return text
+        #            except BaseException as error:
+        #                print('base exception')
+        #                self.ignore_ids.add(new_id)
+        #                pass
+
 
 def readEmails():
     """Shows basic usage of the Gmail API.
@@ -210,3 +304,4 @@ e = EmailRetriever()
 
 for x in e:
     print("EMAIL")
+print('Got {} emails'.format(e.count))
