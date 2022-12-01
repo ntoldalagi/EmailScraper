@@ -40,7 +40,7 @@ class EmailRetriever(object):
         else:
             self.seen_unread_ids = set()
             self.seen_read_ids = set()
-            self.first_id = '184cad4ce2f961a7'
+            self.first_id = None 
 
         if os.path.exists('token.json'):
             self.creds = Credentials.from_authorized_user_file('token.json', SCOPES)
@@ -58,7 +58,7 @@ class EmailRetriever(object):
         self.messages = None
         self.next_msg = 0
 
-        self.max_msgs = 1 # per retrieval cycle
+        self.max_msgs = 10 # per retrieval cycle -> up to 50 emails a day
     
     def __iter__(self):
         return self
@@ -82,7 +82,7 @@ class EmailRetriever(object):
                 return 'even'
             elif 21 <= hr or hr < 2: # night time
                 return 'night'
-            else # late night
+            else: # late night
                 return 'late'
 
         if (self.count >= self.max_msgs):
@@ -111,6 +111,7 @@ class EmailRetriever(object):
 
             # TODO: add timesstamps
             if new_id == self.first_id:
+                print('saw first')
                 raise StopIteration()
             elif new_id in self.seen_unread_ids:
                 print('got seen unread')
