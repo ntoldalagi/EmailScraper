@@ -100,7 +100,7 @@ class EmailRetriever(object):
         
         self.count += 1
         msg = self.service.users().messages().get(userId='me', id=message['id']).execute()
-        
+
         read = 'UNREAD' not in msg['labelIds']
         read_token = 'r' if read else 'u'
 
