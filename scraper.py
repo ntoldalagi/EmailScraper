@@ -19,6 +19,9 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'] #,'https://www.googl
 # email reader generator
 class EmailRetriever(object):
     def __init__(self):
+        print('-'*50)
+        t = time.strftime('%m/%d/%Y, %H:%M:%S')
+        print('running scraper at {}'.format(t))
         self.count = 0
         self.creds = None
         
@@ -37,11 +40,12 @@ class EmailRetriever(object):
         if os.path.exists(self.cfg_path):
             with open(self.cfg_path, 'rb') as f:
                 self.seen_unread_ids, self.seen_read_ids, self.first_id = pickle.load(f)
+            print('first id: ', self.first_id)
         else:
             self.seen_unread_ids = set()
             self.seen_read_ids = set()
             self.first_id = None 
-
+        
         if os.path.exists('token.json'):
             self.creds = Credentials.from_authorized_user_file('token.json', SCOPES)
 
@@ -112,6 +116,7 @@ class EmailRetriever(object):
             # TODO: add timesstamps
             if new_id == self.first_id:
                 print('saw first')
+                self.cleanup()
                 raise StopIteration()
             elif new_id in self.seen_unread_ids:
                 print('got seen unread')
